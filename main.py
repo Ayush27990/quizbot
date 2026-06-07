@@ -73,6 +73,27 @@ Content:
 {content}
 """
 
+def build_image_prompt():
+    return """You are an expert medical educator.
+Analyze this medical image carefully.
+Generate EXACTLY 3 high-quality multiple-choice questions based on what you see.
+Rules:
+- Four options per question
+- One correct answer
+- Clinical style questions
+- Reference specific findings visible in the image
+- Detailed explanation of findings
+Return ONLY JSON.
+Format:
+[
+ {{
+   "question":"Based on this image, ...",
+   "options":["A","B","C","D"],
+   "answer_index":0,
+   "explanation":"Correct: A because... B is wrong because... C is wrong because... D is wrong because..."
+ }}
+]"""
+
 async def generate_questions(content):
     try:
         response = groq_client.chat.completions.create(
@@ -83,6 +104,25 @@ async def generate_questions(content):
         return extract_json(raw)
     except Exception as e:
         logger.error(f"Question generation failed: {e}")
+        return []
+
+async def analyze_image_and_generate(image_bytes):
+    try:
+        encoded = base64.b64encode(image_bytes).decode()
+        response = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+                    {"type": "text", "text": build_image_prompt()}
+                ]
+            }]
+        )
+        raw = response.choices[0].message.content
+        return extract_json(raw)
+    except Exception as e:
+        logger.error(f"Image analysis error: {e}")
         return []
 
 async def fetch_url_content(url):
@@ -100,6 +140,42 @@ async def fetch_url_content(url):
         logger.error(f"URL fetch error: {e}")
         return None
 
+async def fetch_images_from_url(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        images = []
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, headers=headers, follow_redirects=True)
+            soup = BeautifulSoup(response.text, "html.parser")
+            base_url = "/".join(url.split("/")[:3])
+            img_tags = soup.find_all("img")
+            for img in img_tags[:5]:
+                src = img.get("src") or img.get("data-src")
+                if not src:
+                    continue
+                if src.startswith("//"):
+                    src = "https:" + src
+                elif src.startswith("/"):
+                    src = base_url + src
+                elif not src.startswith("http"):
+                    continue
+                skip_keywords = ["logo", "icon", "avatar", "banner", "ad", "social", "button", "arrow"]
+                if any(k in src.lower() for k in skip_keywords):
+                    continue
+                try:
+                    img_response = await client.get(src, headers=headers, follow_redirects=True, timeout=10)
+                    if "image" in img_response.headers.get("content-type", ""):
+                        if len(img_response.content) > 10000:
+                            images.append(img_response.content)
+                except:
+                    continue
+                if len(images) >= 3:
+                    break
+        return images
+    except Exception as e:
+        logger.error(f"Image fetch error: {e}")
+        return []
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎯 QuizMaster Bot\n\n"
@@ -107,16 +183,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📝 Topic (e.g. Cardiology)\n"
         "📄 PDF\n"
         "🖼 Image\n"
-        "🔗 URL (e.g. Radiopaedia or LITFL link)\n\n"
-        "Answer each question and get a detailed explanation!"
+        "🔗 URL (Radiopaedia, LITFL etc)\n\n"
+        "For URLs → I extract images + text and create visual MCQs!\n"
+        "Answer each question to get detailed explanation!"
     )
 
-async def send_quiz(update, questions):
+async def send_quiz(update, questions, image_bytes=None):
     if not questions:
         await update.message.reply_text("❌ Could not generate questions.")
         return
-    for q in questions:
+    for i, q in enumerate(questions):
         try:
+            if image_bytes and i == 0:
+                await update.message.reply_photo(
+                    photo=io.BytesIO(image_bytes),
+                    caption="🔍 Study this image carefully before answering!"
+                )
             poll_message = await update.message.reply_poll(
                 question=q["question"][:300],
                 options=q["options"],
@@ -161,17 +243,30 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.startswith("http://") or text.startswith("https://"):
-        await update.message.reply_text("🔗 URL received! Fetching content...")
+        await update.message.reply_text("🔗 URL received! Fetching content and images...")
         content = await fetch_url_content(text)
-        if not content:
+        images = await fetch_images_from_url(text)
+        if not content and not images:
             await update.message.reply_text("❌ Could not fetch content from URL.")
             return
-        await update.message.reply_text("⏳ Generating quiz from URL...")
+        if images:
+            await update.message.reply_text(f"🖼 Found {len(images)} image(s)! Generating image-based MCQs...")
+            for image_bytes in images:
+                questions = await analyze_image_and_generate(image_bytes)
+                if questions:
+                    await send_quiz(update, questions, image_bytes=image_bytes)
+            if content:
+                await update.message.reply_text("📝 Also generating text-based MCQs from article...")
+                questions = await generate_questions(content)
+                await send_quiz(update, questions)
+        else:
+            await update.message.reply_text("⏳ No images found. Generating quiz from text...")
+            questions = await generate_questions(content)
+            await send_quiz(update, questions)
     else:
         await update.message.reply_text(f"⏳ Generating quiz on: {text}")
-        content = text
-    questions = await generate_questions(content)
-    await send_quiz(update, questions)
+        questions = await generate_questions(text)
+        await send_quiz(update, questions)
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -204,25 +299,13 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             file = await update.message.document.get_file()
         else:
             return
-        file_bytes = await file.download_as_bytearray()
-        encoded = base64.b64encode(bytes(file_bytes)).decode()
-        response = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-                    {"type": "text", "text": "Extract all educational information from this image."}
-                ]
-            }]
-        )
-        extracted = response.choices[0].message.content
-        if not extracted:
-            await update.message.reply_text("❌ No information found.")
+        file_bytes = bytes(await file.download_as_bytearray())
+        questions = await analyze_image_and_generate(file_bytes)
+        if not questions:
+            await update.message.reply_text("❌ Could not generate questions from image.")
             return
-        await update.message.reply_text("⏳ Generating quiz...")
-        questions = await generate_questions(extracted)
-        await send_quiz(update, questions)
+        await update.message.reply_text("⏳ Sending quiz...")
+        await send_quiz(update, questions, image_bytes=file_bytes)
     except Exception as e:
         logger.error(f"Image error: {e}")
         await update.message.reply_text("❌ Image processing failed.")

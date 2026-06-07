@@ -19,7 +19,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Generating quiz on {topic}...")
     prompt = f"""Generate 5 multiple choice questions about {topic}.
 Format as JSON array:
-[{{"question": "...", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "A"}}]
+[{{"question": "...", "options": ["Option 1", "Option 2", "Option 3", "Option 4"], "answer_index": 0}}]
+answer_index is 0-based index of correct option.
 Return ONLY the JSON array, nothing else."""
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -28,22 +29,14 @@ Return ONLY the JSON array, nothing else."""
     raw = response.choices[0].message.content
     match = re.search(r'\[.*\]', raw, re.DOTALL)
     questions = json.loads(match.group())
-    context.user_data["questions"] = questions
-    context.user_data["score"] = 0
-    context.user_data["index"] = 0
-    await ask_question(update, context)
-
-async def ask_question(update, context):
-    questions = context.user_data["questions"]
-    idx = context.user_data["index"]
-    if idx >= len(questions):
-        score = context.user_data["score"]
-        await update.message.reply_text(f"✅ Done! Score: {score}/{len(questions)}\n\nSend another topic to play again!")
-        context.user_data.clear()
-        return
-    q = questions[idx]
-    text = f"Q{idx+1}: {q['question']}\n\n" + "\n".join(q["options"])
-    await update.message.reply_text(text)
+    for q in questions:
+        await update.message.reply_poll(
+            question=q["question"],
+            options=q["options"],
+            type="quiz",
+            correct_option_id=int(q["answer_index"]),
+            is_anonymous=False
+        )
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()

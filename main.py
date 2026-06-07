@@ -12,6 +12,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 groq_client = Groq(api_key=GROQ_API_KEY)
 
+poll_store = {}
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎯 Welcome to QuizMaster Bot!\n\nSend me:\n📝 A topic → e.g. Cardiology\n📄 A PDF → quiz from PDF\n🖼 An image → quiz from image!"
@@ -38,7 +40,7 @@ Return ONLY the JSON array, nothing else."""
     return json.loads(match.group())
 
 async def send_quiz(update, context, questions):
-    for i, q in enumerate(questions):
+    for q in questions:
         msg = await update.message.reply_poll(
             question=q["question"][:300],
             options=q["options"],
@@ -46,7 +48,7 @@ async def send_quiz(update, context, questions):
             correct_option_id=int(q["answer_index"]),
             is_anonymous=False
         )
-        context.bot_data[msg.poll.id] = {
+        poll_store[msg.poll.id] = {
             "explanation": q["explanation"],
             "correct_index": int(q["answer_index"]),
             "options": q["options"],
@@ -56,19 +58,24 @@ async def send_quiz(update, context, questions):
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     answer = update.poll_answer
     poll_id = answer.poll_id
-    if poll_id not in context.bot_data:
+    if poll_id not in poll_store:
         return
-    data = context.bot_data[poll_id]
+    data = poll_store[poll_id]
     correct_index = data["correct_index"]
     options = data["options"]
     explanation = data["explanation"]
     chosen = answer.option_ids[0]
     if chosen == correct_index:
-        result = "✅ Correct\!"
+        result = "✅ Correct!"
     else:
-        result = f"❌ Wrong\! Correct answer: {options[correct_index]}"
-    escaped = explanation.replace(".", "\.").replace("!", "\!").replace("-", "\-").replace("(", "\(").replace(")", "\)").replace(">", "\>").replace("#", "\#").replace("+", "\+").replace("=", "\=").replace("|", "\|").replace("{", "\{").replace("}", "\}").replace("~", "\~")
-    spoiler_text = f"{result}\n\n||{escaped}||"
+        result = f"❌ Wrong! Correct answer: {options[correct_index]}"
+    safe = explanation
+    for ch in ["_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
+        safe = safe.replace(ch, f"\\{ch}")
+    result_safe = result
+    for ch in ["_", "*", "[", "]", "(", ")", "~", "`", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
+        result_safe = result_safe.replace(ch, f"\\{ch}")
+    spoiler_text = f"{result_safe}\n\n||{safe}||"
     await context.bot.send_message(
         chat_id=data["chat_id"],
         text=spoiler_text,

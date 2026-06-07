@@ -5,6 +5,8 @@ import io
 import base64
 import logging
 import PyPDF2
+import httpx
+from bs4 import BeautifulSoup
 
 from telegram import Update
 from telegram.ext import (
@@ -49,7 +51,7 @@ def extract_json(text):
 
 def build_prompt(content):
     return f"""
-You are an expert educator.
+You are an expert medical educator.
 Generate EXACTLY 5 high-quality multiple-choice questions.
 Rules:
 - Four options per question
@@ -83,13 +85,29 @@ async def generate_questions(content):
         logger.error(f"Question generation failed: {e}")
         return []
 
+async def fetch_url_content(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url, headers=headers, follow_redirects=True)
+            soup = BeautifulSoup(response.text, "html.parser")
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            text = soup.get_text(separator="\n", strip=True)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+            return text[:4000]
+    except Exception as e:
+        logger.error(f"URL fetch error: {e}")
+        return None
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎯 QuizMaster Bot\n\n"
         "Send:\n"
         "📝 Topic (e.g. Cardiology)\n"
         "📄 PDF\n"
-        "🖼 Image\n\n"
+        "🖼 Image\n"
+        "🔗 URL (e.g. Radiopaedia or LITFL link)\n\n"
         "Answer each question and get a detailed explanation!"
     )
 
@@ -141,9 +159,18 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Poll answer error: {e}")
 
 async def handle_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = update.message.text.strip()
-    await update.message.reply_text(f"⏳ Generating quiz on: {topic}")
-    questions = await generate_questions(topic)
+    text = update.message.text.strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        await update.message.reply_text("🔗 URL received! Fetching content...")
+        content = await fetch_url_content(text)
+        if not content:
+            await update.message.reply_text("❌ Could not fetch content from URL.")
+            return
+        await update.message.reply_text("⏳ Generating quiz from URL...")
+    else:
+        await update.message.reply_text(f"⏳ Generating quiz on: {text}")
+        content = text
+    questions = await generate_questions(content)
     await send_quiz(update, questions)
 
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):

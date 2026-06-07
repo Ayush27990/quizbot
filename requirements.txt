@@ -1,5 +1,9 @@
-python-telegram-bot==20.3
+python-telegram-bot
 groq
 PyPDF2
+httpx
+beautifulsoup4
+
+
 
 

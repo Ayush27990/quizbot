@@ -1,447 +1,120 @@
 import os
-import json
-import re
-import io
-import base64
-import logging
-import PyPDF2
-
+import random
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    PollAnswerHandler,
-    ContextTypes,
-    filters,
-)
-
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from groq import Groq
 
-# =========================
+# ======================
 # CONFIG
-# =========================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-logger = logging.getLogger(__name__)
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+# ======================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_TOKEN is missing")
+client = Groq(api_key=GROQ_API_KEY)
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY is missing")
+BIOCHEM_LINK = "https://t.me/biochemquizi"
 
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-poll_store = {}
-
-# =========================
-# HELPERS
-# =========================
-
-def extract_json(text):
-    try:
-        match = re.search(r"\[.*\]", text, re.DOTALL)
-
-        if not match:
-            return []
-
-        return json.loads(match.group())
-
-    except Exception as e:
-        logger.error(f"JSON extraction error: {e}")
-        return []
-
-
-def build_prompt(content):
-    return f"""
-You are an expert educator.
-
-Generate EXACTLY 5 high-quality multiple-choice questions.
-
-Rules:
-- Four options per question
-- One correct answer
-- Clinical style if medical content
-- Reasoning-based if general content
-- Detailed explanation
-- Explain why wrong options are wrong
-
-Return ONLY JSON.
-
-Format:
-
-[
- {{
-   "question":"...",
-   "options":["A","B","C","D"],
-   "answer_index":0,
-   "explanation":"..."
- }}
+# ======================
+# SAMPLE MCQs (you can expand later)
+# ======================
+MCQS = [
+    {
+        "q": "Rate limiting enzyme of ketogenesis is:",
+        "options": ["HMG CoA synthase", "HMG CoA reductase", "Citrate synthase", "Pyruvate carboxylase"],
+        "answer": "HMG CoA synthase"
+    },
+    {
+        "q": "G6PD deficiency leads to:",
+        "options": ["Hemolysis", "Polycythemia", "Thrombocytosis", "Leukocytosis"],
+        "answer": "Hemolysis"
+    }
 ]
 
-Content:
+# ======================
+# START COMMAND
+# ======================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Welcome to Biochem MCQ Bot!\nType /mcq to get a question."
+    )
 
-{content}
+# ======================
+# MCQ GENERATOR
+# ======================
+async def mcq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = random.choice(MCQS)
+
+    text = f"""
+🧪 *Biochemistry MCQ*
+
+{q['q']}
+
+A) {q['options'][0]}
+B) {q['options'][1]}
+C) {q['options'][2]}
+D) {q['options'][3]}
 """
 
+    context.user_data["current_answer"] = q["answer"]
 
-async def generate_questions(content):
-    try:
-        prompt = build_prompt(content)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
+# ======================
+# ANSWER HANDLER
+# ======================
+async def answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_ans = update.message.text.strip()
+    correct = context.user_data.get("current_answer")
 
-        raw = response.choices[0].message.content
-
-        questions = extract_json(raw)
-
-        return questions
-
-    except Exception as e:
-        logger.error(f"Question generation failed: {e}")
-        return []
-
-
-# =========================
-# TELEGRAM COMMANDS
-# =========================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    await update.message.reply_text(
-        "🎯 QuizMaster Bot\n\n"
-        "Send:\n"
-        "📝 Topic (Cardiology)\n"
-        "📄 PDF\n"
-        "🖼 Image\n\n"
-        "and I will generate quizzes."
-    )
-
-
-# =========================
-# QUIZ SENDER
-# =========================
-
-async def send_quiz(update, questions):
-
-    if not questions:
-
-        await update.message.reply_text(
-            "❌ Could not generate questions."
-        )
+    if not correct:
+        await update.message.reply_text("Send /mcq first.")
         return
 
-    for q in questions:
+    prompt = f"""
+You are a medical tutor for biochemistry.
 
-        try:
+Question correct answer: {correct}
+User answer: {user_ans}
 
-            explanation = q.get(
-                "explanation",
-                "No explanation available."
-            )
+Give:
+1. Correct explanation
+2. Why other options are wrong
+Keep it concise.
+"""
 
-            poll_message = await update.message.reply_poll(
-                question=q["question"][:300],
-                options=q["options"],
-                type="quiz",
-                correct_option_id=int(q["answer_index"]),
-                is_anonymous=False,
-                explanation=explanation[:200]
-            )
-
-            poll_store[poll_message.poll.id] = {
-                "chat_id": update.effective_chat.id
-            }
-
-        except Exception as e:
-            logger.error(f"Poll send error: {e}")
-
-
-# =========================
-# TEXT HANDLER
-# =========================
-
-async def handle_topic(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    topic = update.message.text.strip()
-
-    await update.message.reply_text(
-        f"⏳ Generating quiz on:\n{topic}"
+    response = client.chat.completions.create(
+        model="llama-3.1-70b-versatile",
+        messages=[{"role": "user", "content": prompt}]
     )
 
-    questions = await generate_questions(topic)
+    explanation = response.choices[0].message.content
 
-    await send_quiz(update, questions)
+    # ======================
+    # SPOILER FORMAT OUTPUT
+    # ======================
+    final_text = f"""||🧪 Answer: {correct}
 
+📘 Explanation:
+{explanation}
 
-# =========================
-# PDF HANDLER
-# =========================
+🔗 Join for more: {BIOCHEM_LINK}||"""
 
-async def handle_pdf(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    try:
-
-        await update.message.reply_text(
-            "📄 PDF received.\nExtracting text..."
-        )
-
-        file = await update.message.document.get_file()
-
-        file_bytes = await file.download_as_bytearray()
-
-        pdf_reader = PyPDF2.PdfReader(
-            io.BytesIO(bytes(file_bytes))
-        )
-
-        text = ""
-
-        max_pages = min(
-            len(pdf_reader.pages),
-            10
-        )
-
-        for page in pdf_reader.pages[:max_pages]:
-
-            extracted = page.extract_text()
-
-            if extracted:
-                text += extracted + "\n"
-
-        if not text.strip():
-
-            await update.message.reply_text(
-                "❌ Could not extract text."
-            )
-
-            return
-
-        text = text[:4000]
-
-        await update.message.reply_text(
-            "⏳ Generating quiz..."
-        )
-
-        questions = await generate_questions(text)
-
-        await send_quiz(update, questions)
-
-    except Exception as e:
-
-        logger.error(f"PDF error: {e}")
-
-        await update.message.reply_text(
-            "❌ PDF processing failed."
-        )
+    await update.message.reply_text(final_text, parse_mode="MarkdownV2")
 
 
-# =========================
-# IMAGE HANDLER
-# =========================
-
-async def handle_image(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    try:
-
-        await update.message.reply_text(
-            "🖼 Analyzing image..."
-        )
-
-        photo = None
-
-        if update.message.photo:
-            photo = update.message.photo[-1]
-            file = await photo.get_file()
-
-        elif update.message.document:
-            file = await update.message.document.get_file()
-
-        else:
-            return
-
-        file_bytes = await file.download_as_bytearray()
-
-        encoded = base64.b64encode(
-            bytes(file_bytes)
-        ).decode()
-
-        response = groq_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url":
-                                f"data:image/jpeg;base64,{encoded}"
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text":
-                            "Extract all educational information from this image."
-                        }
-                    ]
-                }
-            ]
-        )
-
-        extracted = response.choices[0].message.content
-
-        if not extracted:
-
-            await update.message.reply_text(
-                "❌ No information found."
-            )
-
-            return
-
-        await update.message.reply_text(
-            "⏳ Generating quiz..."
-        )
-
-        questions = await generate_questions(extracted)
-
-        await send_quiz(update, questions)
-
-    except Exception as e:
-
-        logger.error(f"Image error: {e}")
-
-        await update.message.reply_text(
-            "❌ Image processing failed."
-        )
-
-
-# =========================
-# POLL ANSWERS
-# =========================
-
-async def handle_poll_answer(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    try:
-
-        poll_id = update.poll_answer.poll_id
-
-        if poll_id not in poll_store:
-            return
-
-        logger.info(
-            f"Poll answered: {poll_id}"
-        )
-
-    except Exception as e:
-
-        logger.error(
-            f"Poll answer error: {e}"
-        )
-
-
-# =========================
-# ERROR HANDLER
-# =========================
-
-async def error_handler(
-    update,
-    context
-):
-
-    logger.error(
-        f"Update error: {context.error}"
-    )
-
-
-# =========================
-# MAIN
-# =========================
-
+# ======================
+# MAIN APP
+# ======================
 def main():
+    app = Application.builder().token(BOT_TOKEN).build()
 
-    logger.info(
-        "Starting QuizMaster Bot..."
-    )
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("mcq", mcq))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, answer))
 
-    app = (
-        ApplicationBuilder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
-
-    app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        PollAnswerHandler(
-            handle_poll_answer
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.Document.PDF,
-            handle_pdf
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.PHOTO,
-            handle_image
-        )
-    )
-
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT &
-            ~filters.COMMAND,
-            handle_topic
-        )
-    )
-
-    app.add_error_handler(
-        error_handler
-    )
-
-    app.run_polling(
-        allowed_updates=[
-            "message",
-            "poll",
-            "poll_answer"
-        ]
-    )
+    print("Bot is running...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
     main()
-

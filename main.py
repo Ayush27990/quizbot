@@ -64,10 +64,11 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     explanation = data["explanation"]
     chosen = answer.option_ids[0]
     if chosen == correct_index:
-        result = "✅ Correct!"
+        result = "✅ Correct\!"
     else:
-        result = f"❌ Wrong! Correct answer: {options[correct_index]}"
-    spoiler_text = f"{result}\n\n||{explanation}||"
+        result = f"❌ Wrong\! Correct answer: {options[correct_index]}"
+    escaped = explanation.replace(".", "\.").replace("!", "\!").replace("-", "\-").replace("(", "\(").replace(")", "\)").replace(">", "\>").replace("#", "\#").replace("+", "\+").replace("=", "\=").replace("|", "\|").replace("{", "\{").replace("}", "\}").replace("~", "\~")
+    spoiler_text = f"{result}\n\n||{escaped}||"
     await context.bot.send_message(
         chat_id=data["chat_id"],
         text=spoiler_text,
@@ -139,4 +140,4 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.run_polling()
+    app.run_polling(allowed_updates=["message", "poll_answer", "poll"])

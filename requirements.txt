@@ -1,9 +1,5 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 groq
 PyPDF2
 httpx
 beautifulsoup4
-
-
-
-

@@ -614,7 +614,10 @@ def main():
    app.add_handler(CallbackQueryHandler(handle_callback))
    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-   app.add_handler(MessageHandler(filters.Poll, handle_forwarded_poll))
+   app.add_handler(MessageHandler(filters.POLL, handle_forwarded_poll))
+
+   
+  
    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
    app.add_error_handler(error_handler)
 

@@ -3,3 +3,4 @@ groq
 PyPDF2
 httpx
 beautifulsoup4
+youtube-transcript-api

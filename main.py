@@ -35,6 +35,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MEDICINE_GROUP_ID = os.getenv("MEDICINE_GROUP_ID")
 ADMIN_ID = 723919716
 INTERVAL = 900
+PENDING_FILE = "pending_questions.json"
 
 if not TELEGRAM_TOKEN:
    raise ValueError("TELEGRAM_TOKEN missing")
@@ -44,7 +45,6 @@ if not MEDICINE_GROUP_ID:
    raise ValueError("MEDICINE_GROUP_ID missing")
 
 client = Groq(api_key=GROQ_API_KEY)
-pending_questions = {}
 used_topics = []
 
 HARRISON_TOPICS = [
@@ -110,6 +110,35 @@ HARRISON_TOPICS = [
    "Dengue fever management",
    "Approach to fever of unknown origin",
 ]
+
+def load_pending():
+   try:
+       with open(PENDING_FILE, "r") as f:
+           data = json.load(f)
+           for qid, item in data.items():
+               if item.get("image_b64"):
+                   item["image_bytes"] = base64.b64decode(item["image_b64"])
+               else:
+                   item["image_bytes"] = None
+           return data
+   except:
+       return {}
+
+def save_pending(data):
+   try:
+       saveable = {}
+       for qid, item in data.items():
+           saveable[qid] = {
+               "question": item["question"],
+               "source": item["source"],
+               "image_b64": base64.b64encode(item["image_bytes"]).decode() if item.get("image_bytes") else None
+           }
+       with open(PENDING_FILE, "w") as f:
+           json.dump(saveable, f)
+   except Exception as e:
+       logger.error("Save pending error: " + str(e))
+
+pending_questions = load_pending()
 
 def escape_md(text):
    for ch in ["_", "*", "[", "]", "(", ")", "~", "`", ">",
@@ -296,12 +325,13 @@ async def analyze_image(image_bytes):
 
 async def send_single_for_approval(bot, question, source, image_bytes=None):
    try:
-       qid = str(int(time.time())) + "_" + str(len(pending_questions))
+       qid = str(int(time.time())) + "_" + str(random.randint(1000, 9999))
        pending_questions[qid] = {
            "question": question,
            "source": source,
            "image_bytes": image_bytes
        }
+       save_pending(pending_questions)
 
        correct_option = question["options"][question["answer_index"]]
        text = (
@@ -410,6 +440,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if data.startswith("approve_"):
        qid = data.replace("approve_", "")
        item = pending_questions.get(qid)
+       logger.info(f"Approve clicked. qid={qid}, found={item is not None}, pending_keys={list(pending_questions.keys())}")
        if item:
            await post_single_to_group(
                context.bot,
@@ -417,18 +448,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                item.get("image_bytes")
            )
            pending_questions.pop(qid, None)
+           save_pending(pending_questions)
            await query.edit_message_text("✅ Posted to medicine group!")
        else:
-           await query.edit_message_text("❌ Question expired.")
+           await query.edit_message_text("❌ Question expired. Use /postnow to generate new ones.")
 
    elif data.startswith("reject_"):
        qid = data.replace("reject_", "")
        pending_questions.pop(qid, None)
+       save_pending(pending_questions)
        await query.edit_message_text("❌ Rejected.")
 
    elif data.startswith("regen_"):
        qid = data.replace("regen_", "")
        pending_questions.pop(qid, None)
+       save_pending(pending_questions)
        await query.edit_message_text("🔄 Regenerating...")
        topic = await generate_topic()
        questions = await generate_questions_from_content(topic, count=1)
@@ -567,6 +601,18 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
        logger.error("Image error: " + str(e))
        await update.message.reply_text("❌ Image processing failed.")
 
+async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if update.effective_user.id != ADMIN_ID:
+       return
+   try:
+       await context.bot.send_message(
+           chat_id=MEDICINE_GROUP_ID,
+           text="🧪 Test message from bot!"
+       )
+       await update.message.reply_text("✅ Success! Bot can post to group. Group ID is correct.")
+   except Exception as e:
+       await update.message.reply_text("❌ Error: " + str(e))
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
@@ -583,6 +629,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
        "All go through your approval!\n\n"
        "Commands:\n"
        "/postnow - Generate immediately\n"
+       "/testgroup - Test group posting\n"
        "/status - Check bot status"
    )
 
@@ -611,13 +658,11 @@ def main():
    app.add_handler(CommandHandler("start", start))
    app.add_handler(CommandHandler("postnow", post_now))
    app.add_handler(CommandHandler("status", status))
+   app.add_handler(CommandHandler("testgroup", test_group))
    app.add_handler(CallbackQueryHandler(handle_callback))
    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
    app.add_handler(MessageHandler(filters.POLL, handle_forwarded_poll))
-
-   
-  
    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
    app.add_error_handler(error_handler)
 

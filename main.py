@@ -140,14 +140,27 @@ def save_pending(data):
 
 pending_questions = load_pending()
 
+def clean_forwarded_text(text):
+   # Remove Telegram spoiler tags
+   text = text.replace("||", "")
+   # Remove common emoji that break JSON parsing
+   text = text.replace("✅", "").replace("❌", "").replace("💡", "").replace("📝", "")
+   text = text.replace("Answer:", "Answer:").strip()
+   # Collapse multiple spaces/newlines
+   text = re.sub(r"\n{3,}", "\n\n", text)
+   text = re.sub(r"[ \t]{2,}", " ", text)
+   return text.strip()
+
 def escape_md(text):
    for ch in ["_", "*", "[", "]", "(", ")", "~", "`", ">",
               "#", "+", "-", "=", "|", "{", "}", ".", "!"]:
-       text = text.replace(ch, f"\\{ch}")
+       text = text.replace(ch, "\\" + ch)
    return text
 
 def extract_json_list(text):
    try:
+       # Strip markdown code fences if present
+       text = re.sub(r"```json|```", "", text).strip()
        match = re.search(r"\[.*\]", text, re.DOTALL)
        if match:
            result = json.loads(match.group())
@@ -235,7 +248,7 @@ async def generate_questions_from_content(content, count=2):
        "- Detailed explanation\n"
        "- Explain why each wrong option is incorrect\n"
        "- NEET PG / USMLE standard\n\n"
-       "Return ONLY JSON array:\n"
+       "Return ONLY a raw JSON array with no markdown, no backticks:\n"
        "[\n"
        "  {\n"
        '    "question": "A 55-year-old patient presents with...",\n'
@@ -262,10 +275,10 @@ async def rephrase_forwarded_mcq(text):
        "Here is a forwarded MCQ:\n\n" + text + "\n\n"
        "Task:\n"
        "1. Slightly rephrase the question stem (keep same meaning)\n"
-       "2. Keep the same options\n"
-       "3. Identify the correct answer\n"
+       "2. Keep the same options A B C D\n"
+       "3. Identify the correct answer index (0 for A, 1 for B, 2 for C, 3 for D)\n"
        "4. Add a detailed explanation\n\n"
-       "Return ONLY JSON array:\n"
+       "Return ONLY a raw JSON array with no markdown, no backticks, no extra text:\n"
        "[\n"
        "  {\n"
        '    "question": "rephrased question...",\n'
@@ -281,7 +294,9 @@ async def rephrase_forwarded_mcq(text):
            messages=[{"role": "user", "content": prompt}],
            temperature=0.3
        )
-       return extract_json_list(response.choices[0].message.content)
+       raw = response.choices[0].message.content
+       logger.info("Rephrase raw response: " + raw[:300])
+       return extract_json_list(raw)
    except Exception as e:
        logger.error("Rephrase error: " + str(e))
        return []
@@ -304,7 +319,7 @@ async def analyze_image(image_bytes):
                            "You are a medical educator.\n"
                            "Analyze this medical image carefully.\n"
                            "Generate 2 high-yield MCQs based on what you see.\n\n"
-                           "Return ONLY JSON array:\n"
+                           "Return ONLY a raw JSON array with no markdown, no backticks:\n"
                            "[\n"
                            "  {\n"
                            '    "question": "Based on this image...",\n'
@@ -440,7 +455,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if data.startswith("approve_"):
        qid = data.replace("approve_", "")
        item = pending_questions.get(qid)
-       logger.info(f"Approve clicked. qid={qid}, found={item is not None}, pending_keys={list(pending_questions.keys())}")
+       logger.info("Approve clicked. qid=" + qid + ", found=" + str(item is not None))
        if item:
            await post_single_to_group(
                context.bot,
@@ -505,6 +520,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    text = update.message.text.strip()
 
+   if text.startswith("/debug"):
+       await update.message.reply_text("🔍 Raw text received:\n\n" + repr(text[:500]))
+       return
+
    if text.startswith("http://") or text.startswith("https://"):
        youtube_id = extract_youtube_id(text)
 
@@ -540,9 +559,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
    else:
        await update.message.reply_text("💬 Forwarded MCQ text detected! Processing...")
-       questions = await rephrase_forwarded_mcq(text)
+
+       # --- FIX: Clean spoiler tags and emojis before sending to Groq ---
+       cleaned = clean_forwarded_text(text)
+       logger.info("Cleaned MCQ text: " + cleaned[:300])
+
+       questions = await rephrase_forwarded_mcq(cleaned)
        if not questions:
-           await update.message.reply_text("❌ Could not process MCQ.")
+           await update.message.reply_text(
+               "❌ Could not process MCQ.\n\n"
+               "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer."
+           )
            return
        for q in questions:
            await send_single_for_approval(context.bot, q, "Forwarded MCQ")
@@ -609,7 +636,7 @@ async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
            chat_id=MEDICINE_GROUP_ID,
            text="🧪 Test message from bot!"
        )
-       await update.message.reply_text("✅ Success! Bot can post to group. Group ID is correct.")
+       await update.message.reply_text("✅ Success! Bot can post to group.")
    except Exception as e:
        await update.message.reply_text("❌ Error: " + str(e))
 
@@ -617,7 +644,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    await update.message.reply_text(
-       "✅ MedHacker Bot Running!\n\n"
+       "✅ QuizMasterBot Running!\n\n"
        "Send me:\n"
        "📝 Forwarded MCQ text\n"
        "📊 Forwarded MCQ poll\n"
@@ -630,7 +657,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
        "Commands:\n"
        "/postnow - Generate immediately\n"
        "/testgroup - Test group posting\n"
-       "/status - Check bot status"
+       "/status - Check bot status\n"
+       "/debug - Echo raw text for troubleshooting"
    )
 
 async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -652,7 +680,7 @@ async def error_handler(update, context):
    logger.error("Update error: " + str(context.error))
 
 def main():
-   logger.info("Starting MedHacker Bot...")
+   logger.info("Starting QuizMasterBot...")
    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
    app.add_handler(CommandHandler("start", start))

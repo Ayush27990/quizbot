@@ -158,18 +158,35 @@ def escape_md(text):
    return text
 
 def extract_json_list(text):
+   cleaned = re.sub(r"```json|```", "", text).strip()
+
+   # Try direct parse first (handles clean array or single object)
    try:
-       # Strip markdown code fences if present
-       text = re.sub(r"```json|```", "", text).strip()
-       match = re.search(r"\[.*\]", text, re.DOTALL)
-       if match:
-           result = json.loads(match.group())
-           if isinstance(result, list):
-               return result
-       return []
-   except Exception as e:
-       logger.error("JSON parse error: " + str(e))
-       return []
+       result = json.loads(cleaned)
+       if isinstance(result, list):
+           return result
+       if isinstance(result, dict):
+           return [result]
+   except Exception:
+       pass
+
+   # Fallback: scan for a valid [ ... ] block, even with stray
+   # brackets elsewhere in the text (common in medical explanations)
+   starts = [i for i, c in enumerate(cleaned) if c == "["]
+   ends = [i for i, c in enumerate(cleaned) if c == "]"]
+   for start in starts:
+       for end in reversed(ends):
+           if end > start:
+               candidate = cleaned[start:end + 1]
+               try:
+                   result = json.loads(candidate)
+                   if isinstance(result, list):
+                       return result
+               except Exception:
+                   continue
+
+   logger.error("JSON parse error: no valid JSON array found. Raw (first 500 chars): " + cleaned[:500])
+   return []
 
 def extract_youtube_id(url):
    patterns = [
@@ -300,6 +317,35 @@ async def rephrase_forwarded_mcq(text):
    except Exception as e:
        logger.error("Rephrase error: " + str(e))
        return []
+
+async def debug_rephrase_raw(text):
+   prompt = (
+       "You are a medical MCQ expert.\n\n"
+       "Here is a forwarded MCQ:\n\n" + text + "\n\n"
+       "Task:\n"
+       "1. Slightly rephrase the question stem (keep same meaning)\n"
+       "2. Keep the same options A B C D\n"
+       "3. Identify the correct answer index (0 for A, 1 for B, 2 for C, 3 for D)\n"
+       "4. Add a detailed explanation\n\n"
+       "Return ONLY a raw JSON array with no markdown, no backticks, no extra text:\n"
+       "[\n"
+       "  {\n"
+       '    "question": "rephrased question...",\n'
+       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
+       '    "answer_index": 0,\n'
+       '    "explanation": "Correct: A because... B is wrong because..."\n'
+       "  }\n"
+       "]"
+   )
+   try:
+       response = client.chat.completions.create(
+           model="llama-3.3-70b-versatile",
+           messages=[{"role": "user", "content": prompt}],
+           temperature=0.3
+       )
+       return response.choices[0].message.content
+   except Exception as e:
+       return "Groq call failed: " + str(e)
 
 async def analyze_image(image_bytes):
    try:
@@ -566,9 +612,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
        questions = await rephrase_forwarded_mcq(cleaned)
        if not questions:
+           # Get raw Groq output for debugging directly in Telegram
+           raw_debug = await debug_rephrase_raw(cleaned)
            await update.message.reply_text(
                "❌ Could not process MCQ.\n\n"
-               "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer."
+               "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer.\n\n"
+               "🔍 Groq raw output:\n" + raw_debug[:800]
            )
            return
        for q in questions:

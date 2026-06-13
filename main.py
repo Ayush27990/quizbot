@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MEDICINE_GROUP_ID = os.getenv("MEDICINE_GROUP_ID")
 ADMIN_ID = 723919716
 INTERVAL = 900
@@ -41,6 +42,8 @@ if not TELEGRAM_TOKEN:
    raise ValueError("TELEGRAM_TOKEN missing")
 if not GROQ_API_KEY:
    raise ValueError("GROQ_API_KEY missing")
+if not OPENROUTER_API_KEY:
+   raise ValueError("OPENROUTER_API_KEY missing")
 if not MEDICINE_GROUP_ID:
    raise ValueError("MEDICINE_GROUP_ID missing")
 
@@ -141,12 +144,9 @@ def save_pending(data):
 pending_questions = load_pending()
 
 def clean_forwarded_text(text):
-   # Remove Telegram spoiler tags
    text = text.replace("||", "")
-   # Remove common emoji that break JSON parsing
    text = text.replace("✅", "").replace("❌", "").replace("💡", "").replace("📝", "")
    text = text.replace("Answer:", "Answer:").strip()
-   # Collapse multiple spaces/newlines
    text = re.sub(r"\n{3,}", "\n\n", text)
    text = re.sub(r"[ \t]{2,}", " ", text)
    return text.strip()
@@ -160,7 +160,6 @@ def escape_md(text):
 def extract_json_list(text):
    cleaned = re.sub(r"```json|```", "", text).strip()
 
-   # Try direct parse first (handles clean array or single object)
    try:
        result = json.loads(cleaned)
        if isinstance(result, list):
@@ -170,8 +169,6 @@ def extract_json_list(text):
    except Exception:
        pass
 
-   # Fallback: scan for a valid [ ... ] block, even with stray
-   # brackets elsewhere in the text (common in medical explanations)
    starts = [i for i, c in enumerate(cleaned) if c == "["]
    ends = [i for i, c in enumerate(cleaned) if c == "]"]
    for start in starts:
@@ -350,36 +347,61 @@ async def debug_rephrase_raw(text):
 async def analyze_image(image_bytes):
    try:
        encoded = base64.b64encode(image_bytes).decode()
-       response = client.chat.completions.create(
-           model="meta-llama/llama-4-scout-17b-16e-instruct",
-           messages=[{
-               "role": "user",
-               "content": [
-                   {
-                       "type": "image_url",
-                       "image_url": {"url": "data:image/jpeg;base64," + encoded}
-                   },
-                   {
-                       "type": "text",
-                       "text": (
-                           "You are a medical educator.\n"
-                           "Analyze this medical image carefully.\n"
-                           "Generate 2 high-yield MCQs based on what you see.\n\n"
-                           "Return ONLY a raw JSON array with no markdown, no backticks:\n"
-                           "[\n"
-                           "  {\n"
-                           '    "question": "Based on this image...",\n'
-                           '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
-                           '    "answer_index": 0,\n'
-                           '    "explanation": "Correct: A because..."\n'
-                           "  }\n"
-                           "]"
-                       )
-                   }
-               ]
-           }]
-       )
-       return extract_json_list(response.choices[0].message.content)
+
+       async with httpx.AsyncClient(timeout=30) as http_client:
+           response = await http_client.post(
+               "https://openrouter.ai/api/v1/chat/completions",
+               headers={
+                   "Authorization": "Bearer " + OPENROUTER_API_KEY,
+                   "Content-Type": "application/json",
+                   "HTTP-Referer": "https://github.com/Ayush27990/quizbot",
+                   "X-Title": "QuizMasterBot"
+               },
+               json={
+                   "model": "qwen/qwen2.5-vl-72b-instruct",
+                   "max_tokens": 1500,
+                   "messages": [
+                       {
+                           "role": "user",
+                           "content": [
+                               {
+                                   "type": "image_url",
+                                   "image_url": {
+                                       "url": "data:image/jpeg;base64," + encoded
+                                   }
+                               },
+                               {
+                                   "type": "text",
+                                   "text": (
+                                       "You are a medical educator.\n"
+                                       "Analyze this medical image carefully.\n"
+                                       "Generate 2 high-yield MCQs based on what you see.\n\n"
+                                       "Return ONLY a raw JSON array with no markdown, no backticks:\n"
+                                       "[\n"
+                                       "  {\n"
+                                       '    "question": "Based on this image...",\n'
+                                       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
+                                       '    "answer_index": 0,\n'
+                                       '    "explanation": "Correct: A because..."\n'
+                                       "  }\n"
+                                       "]"
+                                   )
+                               }
+                           ]
+                       }
+                   ]
+               }
+           )
+
+           data = response.json()
+
+           if "error" in data:
+               logger.error("OpenRouter error: " + str(data["error"]))
+               return []
+
+           content = data["choices"][0]["message"]["content"]
+           return extract_json_list(content)
+
    except Exception as e:
        logger.error("Image analysis error: " + str(e))
        return []
@@ -606,13 +628,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
    else:
        await update.message.reply_text("💬 Forwarded MCQ text detected! Processing...")
 
-       # --- FIX: Clean spoiler tags and emojis before sending to Groq ---
        cleaned = clean_forwarded_text(text)
        logger.info("Cleaned MCQ text: " + cleaned[:300])
 
        questions = await rephrase_forwarded_mcq(cleaned)
        if not questions:
-           # Get raw Groq output for debugging directly in Telegram
            raw_debug = await debug_rephrase_raw(cleaned)
            await update.message.reply_text(
                "❌ Could not process MCQ.\n\n"
@@ -657,7 +677,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    try:
-       await update.message.reply_text("🖼 Image received! Analyzing...")
+       await update.message.reply_text("🖼 Image received! Analyzing with Qwen2.5-VL...")
        if update.message.photo:
            file = await update.message.photo[-1].get_file()
        elif update.message.document:
@@ -698,7 +718,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
        "📝 Forwarded MCQ text\n"
        "📊 Forwarded MCQ poll\n"
        "📄 PDF\n"
-       "🖼 Image\n"
+       "🖼 Image (powered by Qwen2.5-VL)\n"
        "🔗 Article URL\n"
        "🎥 YouTube URL\n\n"
        "Auto: 2 Harrison MCQs every 15 min\n"

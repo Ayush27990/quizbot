@@ -159,17 +159,36 @@ def escape_md(text):
    return text
 
 def extract_json_list(text):
+   raw = text
    try:
        # Strip markdown code fences if present
        text = re.sub(r"```json|```", "", text).strip()
        match = re.search(r"\[.*\]", text, re.DOTALL)
-       if match:
-           result = json.loads(match.group())
+       if not match:
+           logger.error("JSON parse error: no array found. Raw (first 500 chars): " + raw[:500])
+           return []
+       candidate = match.group()
+       try:
+           result = json.loads(candidate)
            if isinstance(result, list):
                return result
-       return []
+           return []
+       except Exception:
+           # Try common auto-fixes for malformed JSON from the model
+           fixed = candidate
+           # remove trailing commas before ] or }
+           fixed = re.sub(r",\s*([\]}])", r"\1", fixed)
+           # remove control characters
+           fixed = re.sub(r"[\x00-\x1f]+", " ", fixed)
+           try:
+               result = json.loads(fixed)
+               if isinstance(result, list):
+                   return result
+           except Exception as e2:
+               logger.error("JSON parse error after fix attempt: " + str(e2) + " | Raw (first 500 chars): " + raw[:500])
+           return []
    except Exception as e:
-       logger.error("JSON parse error: " + str(e))
+       logger.error("JSON parse error: " + str(e) + " | Raw (first 500 chars): " + raw[:500])
        return []
 
 def extract_youtube_id(url):
@@ -239,33 +258,49 @@ async def generate_topic():
        return random.choice(HARRISON_TOPICS)
 
 async def generate_questions_from_content(content, count=2):
-   prompt = (
-       "You are a Harrison Internal Medicine expert examiner.\n\n"
-       "Generate EXACTLY " + str(count) + " high-yield clinical MCQs based on:\n\n"
-       + content + "\n\n"
-       "Rules:\n"
-       "- Clinical vignette with patient scenario\n"
-       "- 4 options, one definitively correct\n"
-       "- Detailed explanation\n"
-       "- Explain why each wrong option is incorrect\n"
-       "- NEET PG / USMLE standard\n\n"
-       "Return ONLY a raw JSON array with no markdown, no backticks:\n"
-       "[\n"
-       "  {\n"
-       '    "question": "A 55-year-old patient presents with...",\n'
-       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
-       '    "answer_index": 0,\n'
-       '    "explanation": "Correct: A because... B is wrong because..."\n'
-       "  }\n"
-       "]"
-   )
+   def build_prompt(c):
+       return (
+           "You are a Harrison Internal Medicine expert examiner.\n\n"
+           "Generate EXACTLY " + str(count) + " high-yield clinical MCQs based on:\n\n"
+           + c + "\n\n"
+           "Rules:\n"
+           "- Clinical vignette with patient scenario\n"
+           "- 4 options, one definitively correct\n"
+           "- Detailed explanation\n"
+           "- Explain why each wrong option is incorrect\n"
+           "- NEET PG / USMLE standard\n\n"
+           "Return ONLY a raw JSON array with no markdown, no backticks, no extra commentary:\n"
+           "[\n"
+           "  {\n"
+           '    "question": "A 55-year-old patient presents with...",\n'
+           '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
+           '    "answer_index": 0,\n'
+           '    "explanation": "Correct: A because... B is wrong because..."\n'
+           "  }\n"
+           "]"
+       )
    try:
        response = client.chat.completions.create(
            model="llama-3.3-70b-versatile",
-           messages=[{"role": "user", "content": prompt}],
+           messages=[{"role": "user", "content": build_prompt(content)}],
            temperature=0.3
        )
-       return extract_json_list(response.choices[0].message.content)
+       raw = response.choices[0].message.content
+       result = extract_json_list(raw)
+       if result:
+           return result
+
+       # --- Retry once with shortened/cleaned content if first attempt failed ---
+       logger.info("First attempt failed, retrying with trimmed content...")
+       trimmed = re.sub(r"[\x00-\x1f]+", " ", content)
+       trimmed = re.sub(r"\s{2,}", " ", trimmed).strip()[:2000]
+       response2 = client.chat.completions.create(
+           model="llama-3.3-70b-versatile",
+           messages=[{"role": "user", "content": build_prompt(trimmed)}],
+           temperature=0.3
+       )
+       raw2 = response2.choices[0].message.content
+       return extract_json_list(raw2)
    except Exception as e:
        logger.error("Question generation error: " + str(e))
        return []
@@ -649,6 +684,12 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
            text += "\n"
 
        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+       # --- FIX: remove control chars and stray bullet/special symbols that confuse Groq's JSON output ---
+       text = re.sub(r"[\x00-\x1f]+", " ", text)
+       text = re.sub(r"[•▪►➤●○◦]", "-", text)
+       text = re.sub(r"[ \t]{2,}", " ", text)
+       text = text.strip()
 
        if not text.strip():
            await update.message.reply_text("❌ Could not extract any text from this PPTX. It may contain only images.")

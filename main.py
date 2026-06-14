@@ -344,68 +344,95 @@ async def debug_rephrase_raw(text):
    except Exception as e:
        return "Groq call failed: " + str(e)
 
-async def analyze_image(image_bytes):
-   try:
-       encoded = base64.b64encode(image_bytes).decode()
+async def analyze_image(image_bytes, bot=None):
+   models_to_try = [
+       "google/gemini-2.5-flash-preview:free",
+       "google/gemini-2.5-flash:free",
+       "meta-llama/llama-4-maverick:free",
+   ]
 
-       async with httpx.AsyncClient(timeout=30) as http_client:
-           response = await http_client.post(
-               "https://openrouter.ai/api/v1/chat/completions",
-               headers={
-                   "Authorization": "Bearer " + OPENROUTER_API_KEY,
-                   "Content-Type": "application/json",
-                   "HTTP-Referer": "https://github.com/Ayush27990/quizbot",
-                   "X-Title": "QuizMasterBot"
-               },
-               json={
-                   "model": "google/gemini-2.5-flash:free",
-                   "max_tokens": 1500,
-                   "messages": [
-                       {
-                           "role": "user",
-                           "content": [
-                               {
-                                   "type": "image_url",
-                                   "image_url": {
-                                       "url": "data:image/jpeg;base64," + encoded
+   encoded = base64.b64encode(image_bytes).decode()
+
+   for model in models_to_try:
+       try:
+           logger.info("Trying model: " + model)
+           async with httpx.AsyncClient(timeout=30) as http_client:
+               response = await http_client.post(
+                   "https://openrouter.ai/api/v1/chat/completions",
+                   headers={
+                       "Authorization": "Bearer " + OPENROUTER_API_KEY,
+                       "Content-Type": "application/json",
+                       "HTTP-Referer": "https://github.com/Ayush27990/quizbot",
+                       "X-Title": "QuizMasterBot"
+                   },
+                   json={
+                       "model": model,
+                       "max_tokens": 1500,
+                       "messages": [
+                           {
+                               "role": "user",
+                               "content": [
+                                   {
+                                       "type": "image_url",
+                                       "image_url": {
+                                           "url": "data:image/jpeg;base64," + encoded
+                                       }
+                                   },
+                                   {
+                                       "type": "text",
+                                       "text": (
+                                           "You are a medical educator.\n"
+                                           "Analyze this medical image carefully.\n"
+                                           "Generate 2 high-yield MCQs based on what you see.\n\n"
+                                           "Return ONLY a raw JSON array with no markdown, no backticks:\n"
+                                           "[\n"
+                                           "  {\n"
+                                           '    "question": "Based on this image...",\n'
+                                           '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
+                                           '    "answer_index": 0,\n'
+                                           '    "explanation": "Correct: A because..."\n'
+                                           "  }\n"
+                                           "]"
+                                       )
                                    }
-                               },
-                               {
-                                   "type": "text",
-                                   "text": (
-                                       "You are a medical educator.\n"
-                                       "Analyze this medical image carefully.\n"
-                                       "Generate 2 high-yield MCQs based on what you see.\n\n"
-                                       "Return ONLY a raw JSON array with no markdown, no backticks:\n"
-                                       "[\n"
-                                       "  {\n"
-                                       '    "question": "Based on this image...",\n'
-                                       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
-                                       '    "answer_index": 0,\n'
-                                       '    "explanation": "Correct: A because..."\n'
-                                       "  }\n"
-                                       "]"
-                                   )
-                               }
-                           ]
-                       }
-                   ]
-               }
-           )
+                               ]
+                           }
+                       ]
+                   }
+               )
 
-           data = response.json()
-           logger.info("OpenRouter response: " + str(data)[:300])
+               data = response.json()
+               logger.info("OpenRouter response for " + model + ": " + str(data)[:500])
 
-           if "error" in data:
-               logger.error("OpenRouter error: " + str(data["error"]))
-               return []
+               if "error" in data:
+                   err_msg = str(data["error"])
+                   logger.error("Model " + model + " error: " + err_msg)
+                   if bot:
+                       await bot.send_message(
+                           chat_id=ADMIN_ID,
+                           text="⚠️ Model " + model + " failed:\n" + err_msg[:300]
+                       )
+                   continue
 
-           content = data["choices"][0]["message"]["content"]
-           return extract_json_list(content)
+               content = data["choices"][0]["message"]["content"]
+               result = extract_json_list(content)
+               if result:
+                   logger.info("Success with model: " + model)
+                   return result
+               else:
+                   logger.error("Empty result from model: " + model)
+                   continue
 
-   except Exception as e:
-       logger.error("Image analysis error: " + str(e))
-       return []
+       except Exception as e:
+           logger.error("Exception with model " + model + ": " + str(e))
+           if bot:
+               await bot.send_message(
+                   chat_id=ADMIN_ID,
+                   text="⚠️ Exception with " + model + ":\n" + str(e)[:300]
+               )
+           continue
+
+   return []
 
 async def send_single_for_approval(bot, question, source, image_bytes=None):
    try:
@@ -686,9 +713,11 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
        else:
            return
        file_bytes = bytes(await file.download_as_bytearray())
-       questions = await analyze_image(file_bytes)
+       questions = await analyze_image(file_bytes, bot=context.bot)
        if not questions:
-           await update.message.reply_text("❌ Could not generate MCQs from image.")
+           await update.message.reply_text(
+               "❌ All models failed. Check the ⚠️ error messages above for details."
+           )
            return
        await update.message.reply_text("⏳ Sending for approval...")
        for q in questions:
@@ -696,7 +725,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("Image error: " + str(e))
-       await update.message.reply_text("❌ Image processing failed.")
+       await update.message.reply_text("❌ Image processing failed: " + str(e)[:200])
 
 async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:

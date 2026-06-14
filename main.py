@@ -48,6 +48,30 @@ if not MEDICINE_GROUP_ID:
 client = Groq(api_key=GROQ_API_KEY)
 used_topics = []
 
+def safe_groq_call(model, messages, temperature=0.3, retries=2):
+   """Call Groq with retry/backoff for transient rate-limit or server errors."""
+   delay = 2
+   last_err = None
+   for attempt in range(retries + 1):
+       try:
+           return client.chat.completions.create(
+               model=model,
+               messages=messages,
+               temperature=temperature
+           )
+       except Exception as e:
+           last_err = e
+           msg = str(e).lower()
+           if "rate" in msg or "429" in msg or "503" in msg or "timeout" in msg:
+               logger.error("Groq transient error (attempt " + str(attempt + 1) + "): " + str(e))
+               time.sleep(delay)
+               delay *= 2
+               continue
+           else:
+               logger.error("Groq error: " + str(e))
+               raise
+   raise last_err
+
 HARRISON_TOPICS = [
    "Approach to the patient with chest pain",
    "Acute coronary syndrome STEMI NSTEMI",
@@ -280,9 +304,9 @@ async def generate_questions_from_content(content, count=2):
            "]"
        )
    try:
-       response = client.chat.completions.create(
-           model="llama-3.3-70b-versatile",
-           messages=[{"role": "user", "content": build_prompt(content)}],
+       response = safe_groq_call(
+           "llama-3.3-70b-versatile",
+           [{"role": "user", "content": build_prompt(content)}],
            temperature=0.3
        )
        raw = response.choices[0].message.content
@@ -294,9 +318,9 @@ async def generate_questions_from_content(content, count=2):
        logger.info("First attempt failed, retrying with trimmed content...")
        trimmed = re.sub(r"[\x00-\x1f]+", " ", content)
        trimmed = re.sub(r"\s{2,}", " ", trimmed).strip()[:2000]
-       response2 = client.chat.completions.create(
-           model="llama-3.3-70b-versatile",
-           messages=[{"role": "user", "content": build_prompt(trimmed)}],
+       response2 = safe_groq_call(
+           "llama-3.3-70b-versatile",
+           [{"role": "user", "content": build_prompt(trimmed)}],
            temperature=0.3
        )
        raw2 = response2.choices[0].message.content
@@ -325,9 +349,9 @@ async def rephrase_forwarded_mcq(text):
        "]"
    )
    try:
-       response = client.chat.completions.create(
-           model="llama-3.3-70b-versatile",
-           messages=[{"role": "user", "content": prompt}],
+       response = safe_groq_call(
+           "llama-3.3-70b-versatile",
+           [{"role": "user", "content": prompt}],
            temperature=0.3
        )
        raw = response.choices[0].message.content
@@ -662,6 +686,46 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
        logger.error("PDF error: " + str(e))
        await update.message.reply_text("❌ PDF processing failed.")
 
+def get_slide_text(slide):
+   parts = []
+   for shape in slide.shapes:
+       if hasattr(shape, "has_text_frame") and shape.has_text_frame:
+           t = shape.text_frame.text
+           if t and t.strip():
+               parts.append(t)
+       elif hasattr(shape, "text") and shape.text:
+           parts.append(shape.text)
+   combined = "\n".join(parts)
+   # vertical-tab (\x0b) is used by PowerPoint for soft line breaks between options
+   combined = combined.replace("\x0b", "\n")
+   combined = re.sub(r"[\x00-\x09\x0c-\x1f]+", " ", combined)
+   combined = re.sub(r"[ \t]{2,}", " ", combined)
+   return combined.strip()
+
+def parse_pptx_quiz_blocks(prs, max_blocks=5):
+   """Detect Question -> Answer -> (Explanation) slide patterns common in
+   pre-made MCQ decks, and return cleaned text blocks ready for rephrasing."""
+   slides_text = [get_slide_text(s) for s in prs.slides]
+   blocks = []
+   i = 0
+   while i < len(slides_text) and len(blocks) < max_blocks:
+       t = slides_text[i]
+       option_lines = re.findall(r"(?m)^[A-D][\.\)]\s*.+", t)
+       if len(option_lines) >= 3:
+           block = t
+           consumed = 1
+           if i + 1 < len(slides_text) and re.search(r"answer", slides_text[i + 1], re.I):
+               block += "\n\n" + slides_text[i + 1]
+               consumed = 2
+               if i + 2 < len(slides_text) and re.search(r"explanation", slides_text[i + 2], re.I):
+                   block += "\n\n" + slides_text[i + 2]
+                   consumed = 3
+           blocks.append(block)
+           i += consumed
+       else:
+           i += 1
+   return blocks, len(slides_text)
+
 async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
@@ -671,32 +735,45 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
        file_bytes = await file.download_as_bytearray()
 
        prs = Presentation(io.BytesIO(bytes(file_bytes)))
-       text = ""
-       for slide in prs.slides:
-           for shape in slide.shapes:
-               if hasattr(shape, "text") and shape.text:
-                   text += shape.text + "\n"
-               if shape.has_text_frame:
-                   for para in shape.text_frame.paragraphs:
-                       for run in para.runs:
-                           if run.text:
-                               text += run.text + "\n"
-           text += "\n"
 
+       # --- Try to detect pre-made MCQs (Question -> Answer -> Explanation slides) ---
+       blocks, total_slides = parse_pptx_quiz_blocks(prs, max_blocks=5)
+
+       if blocks:
+           await update.message.reply_text(
+               "✅ Found " + str(len(blocks)) + " ready-made MCQ(s) in this PPTX (out of "
+               + str(total_slides) + " slides). Processing them now..."
+           )
+           sent_any = False
+           for block in blocks:
+               cleaned = clean_forwarded_text(block)
+               questions = await rephrase_forwarded_mcq(cleaned)
+               if not questions:
+                   await asyncio.sleep(1)
+                   questions = await rephrase_forwarded_mcq(cleaned)
+               if questions:
+                   for q in questions:
+                       await send_single_for_approval(context.bot, q, "PPTX Upload")
+                       await asyncio.sleep(1)
+                   sent_any = True
+               else:
+                   logger.error("Could not process one MCQ block from PPTX")
+               await asyncio.sleep(1)
+           if not sent_any:
+               await update.message.reply_text("❌ Found MCQs in the PPTX but the AI failed to process any of them.")
+           return
+
+       # --- Fallback: treat as lecture slides, generate new MCQs from content ---
+       text = "\n\n".join(get_slide_text(s) for s in prs.slides)
+       text = re.sub(r"[•▪►➤●○◦]", "-", text)
        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-       # --- FIX: remove control chars and stray bullet/special symbols that confuse Groq's JSON output ---
-       text = re.sub(r"[\x00-\x1f]+", " ", text)
-       text = re.sub(r"[•▪►➤●○◦]", "-", text)
-       text = re.sub(r"[ \t]{2,}", " ", text)
-       text = text.strip()
-
-       if not text.strip():
+       if not text:
            await update.message.reply_text("❌ Could not extract any text from this PPTX. It may contain only images.")
            return
 
        text = text[:4000]
-       await update.message.reply_text("⏳ Generating MCQs from PPTX...")
+       await update.message.reply_text("⏳ No ready-made MCQs detected — generating new MCQs from slide content...")
        questions = await generate_questions_from_content(text, count=2)
        if not questions:
            questions = await generate_questions_from_content(text, count=1)

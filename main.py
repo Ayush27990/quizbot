@@ -9,6 +9,7 @@ import base64
 import random
 
 import PyPDF2
+from pptx import Presentation
 import httpx
 from bs4 import BeautifulSoup
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -32,7 +33,6 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 MEDICINE_GROUP_ID = os.getenv("MEDICINE_GROUP_ID")
 ADMIN_ID = 723919716
 INTERVAL = 900
@@ -42,8 +42,6 @@ if not TELEGRAM_TOKEN:
    raise ValueError("TELEGRAM_TOKEN missing")
 if not GROQ_API_KEY:
    raise ValueError("GROQ_API_KEY missing")
-if not OPENROUTER_API_KEY:
-   raise ValueError("OPENROUTER_API_KEY missing")
 if not MEDICINE_GROUP_ID:
    raise ValueError("MEDICINE_GROUP_ID missing")
 
@@ -144,9 +142,12 @@ def save_pending(data):
 pending_questions = load_pending()
 
 def clean_forwarded_text(text):
+   # Remove Telegram spoiler tags
    text = text.replace("||", "")
+   # Remove common emoji that break JSON parsing
    text = text.replace("✅", "").replace("❌", "").replace("💡", "").replace("📝", "")
    text = text.replace("Answer:", "Answer:").strip()
+   # Collapse multiple spaces/newlines
    text = re.sub(r"\n{3,}", "\n\n", text)
    text = re.sub(r"[ \t]{2,}", " ", text)
    return text.strip()
@@ -158,32 +159,18 @@ def escape_md(text):
    return text
 
 def extract_json_list(text):
-   cleaned = re.sub(r"```json|```", "", text).strip()
-
    try:
-       result = json.loads(cleaned)
-       if isinstance(result, list):
-           return result
-       if isinstance(result, dict):
-           return [result]
-   except Exception:
-       pass
-
-   starts = [i for i, c in enumerate(cleaned) if c == "["]
-   ends = [i for i, c in enumerate(cleaned) if c == "]"]
-   for start in starts:
-       for end in reversed(ends):
-           if end > start:
-               candidate = cleaned[start:end + 1]
-               try:
-                   result = json.loads(candidate)
-                   if isinstance(result, list):
-                       return result
-               except Exception:
-                   continue
-
-   logger.error("JSON parse error: no valid JSON array found. Raw (first 500 chars): " + cleaned[:500])
-   return []
+       # Strip markdown code fences if present
+       text = re.sub(r"```json|```", "", text).strip()
+       match = re.search(r"\[.*\]", text, re.DOTALL)
+       if match:
+           result = json.loads(match.group())
+           if isinstance(result, list):
+               return result
+       return []
+   except Exception as e:
+       logger.error("JSON parse error: " + str(e))
+       return []
 
 def extract_youtube_id(url):
    patterns = [
@@ -315,125 +302,9 @@ async def rephrase_forwarded_mcq(text):
        logger.error("Rephrase error: " + str(e))
        return []
 
-async def debug_rephrase_raw(text):
-   prompt = (
-       "You are a medical MCQ expert.\n\n"
-       "Here is a forwarded MCQ:\n\n" + text + "\n\n"
-       "Task:\n"
-       "1. Slightly rephrase the question stem (keep same meaning)\n"
-       "2. Keep the same options A B C D\n"
-       "3. Identify the correct answer index (0 for A, 1 for B, 2 for C, 3 for D)\n"
-       "4. Add a detailed explanation\n\n"
-       "Return ONLY a raw JSON array with no markdown, no backticks, no extra text:\n"
-       "[\n"
-       "  {\n"
-       '    "question": "rephrased question...",\n'
-       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
-       '    "answer_index": 0,\n'
-       '    "explanation": "Correct: A because... B is wrong because..."\n'
-       "  }\n"
-       "]"
-   )
+async def analyze_image(image_bytes):
    try:
-       response = client.chat.completions.create(
-           model="llama-3.3-70b-versatile",
-           messages=[{"role": "user", "content": prompt}],
-           temperature=0.3
-       )
-       return response.choices[0].message.content
-   except Exception as e:
-       return "Groq call failed: " + str(e)
-
-async def analyze_image(image_bytes, bot=None):
-   models_to_try = [
-       "google/gemma-4-31b-it:free",
-       "qwen/qwen2.5-vl-32b-instruct:free",
-       "meta-llama/llama-3.2-11b-vision-instruct:free",
-   ]
-
-   encoded = base64.b64encode(image_bytes).decode()
-
-   prompt_text = (
-       "You are a medical educator.\n"
-       "Analyze this medical image carefully.\n"
-       "Generate 2 high-yield MCQs based on what you see.\n\n"
-       "Return ONLY a raw JSON array with no markdown, no backticks:\n"
-       "[\n"
-       "  {\n"
-       '    "question": "Based on this image...",\n'
-       '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
-       '    "answer_index": 0,\n'
-       '    "explanation": "Correct: A because..."\n'
-       "  }\n"
-       "]"
-   )
-
-   for model in models_to_try:
-       try:
-           logger.info("Trying model: " + model)
-           async with httpx.AsyncClient(timeout=30) as http_client:
-               response = await http_client.post(
-                   "https://openrouter.ai/api/v1/chat/completions",
-                   headers={
-                       "Authorization": "Bearer " + OPENROUTER_API_KEY,
-                       "Content-Type": "application/json",
-                       "HTTP-Referer": "https://github.com/Ayush27990/quizbot",
-                       "X-Title": "QuizMasterBot"
-                   },
-                   json={
-                       "model": model,
-                       "max_tokens": 1500,
-                       "messages": [
-                           {
-                               "role": "user",
-                               "content": [
-                                   {
-                                       "type": "image_url",
-                                       "image_url": {
-                                           "url": "data:image/jpeg;base64," + encoded
-                                       }
-                                   },
-                                   {"type": "text", "text": prompt_text}
-                               ]
-                           }
-                       ]
-                   }
-               )
-
-               data = response.json()
-               logger.info("OpenRouter response for " + model + ": " + str(data)[:500])
-
-               if "error" in data:
-                   err_msg = str(data["error"])
-                   logger.error("Model " + model + " error: " + err_msg)
-                   if bot:
-                       await bot.send_message(
-                           chat_id=ADMIN_ID,
-                           text="⚠️ Model " + model + " failed:\n" + err_msg[:300]
-                       )
-                   continue
-
-               content = data["choices"][0]["message"]["content"]
-               result = extract_json_list(content)
-               if result:
-                   logger.info("Success with model: " + model)
-                   return result
-               else:
-                   logger.error("Empty result from model: " + model)
-                   continue
-
-       except Exception as e:
-           logger.error("Exception with model " + model + ": " + str(e))
-           if bot:
-               await bot.send_message(
-                   chat_id=ADMIN_ID,
-                   text="⚠️ Exception with " + model + ":\n" + str(e)[:300]
-               )
-           continue
-
-   # Final fallback: Groq's llama-4-scout (confirmed working, separate from OpenRouter)
-   try:
-       logger.info("Trying final fallback: Groq llama-4-scout")
+       encoded = base64.b64encode(image_bytes).decode()
        response = client.chat.completions.create(
            model="meta-llama/llama-4-scout-17b-16e-instruct",
            messages=[{
@@ -443,23 +314,30 @@ async def analyze_image(image_bytes, bot=None):
                        "type": "image_url",
                        "image_url": {"url": "data:image/jpeg;base64," + encoded}
                    },
-                   {"type": "text", "text": prompt_text}
+                   {
+                       "type": "text",
+                       "text": (
+                           "You are a medical educator.\n"
+                           "Analyze this medical image carefully.\n"
+                           "Generate 2 high-yield MCQs based on what you see.\n\n"
+                           "Return ONLY a raw JSON array with no markdown, no backticks:\n"
+                           "[\n"
+                           "  {\n"
+                           '    "question": "Based on this image...",\n'
+                           '    "options": ["A) ...", "B) ...", "C) ...", "D) ..."],\n'
+                           '    "answer_index": 0,\n'
+                           '    "explanation": "Correct: A because..."\n'
+                           "  }\n"
+                           "]"
+                       )
+                   }
                ]
            }]
        )
-       result = extract_json_list(response.choices[0].message.content)
-       if result:
-           logger.info("Success with Groq llama-4-scout fallback")
-           return result
+       return extract_json_list(response.choices[0].message.content)
    except Exception as e:
-       logger.error("Groq fallback error: " + str(e))
-       if bot:
-           await bot.send_message(
-               chat_id=ADMIN_ID,
-               text="⚠️ Groq fallback also failed:\n" + str(e)[:300]
-           )
-
-   return []
+       logger.error("Image analysis error: " + str(e))
+       return []
 
 async def send_single_for_approval(bot, question, source, image_bytes=None):
    try:
@@ -621,14 +499,32 @@ async def handle_forwarded_poll(update: Update, context: ContextTypes.DEFAULT_TY
            return
        question = poll.question
        options = [opt.text for opt in poll.options]
+
+       # --- FIX: strip hashtags and clean text before building MCQ ---
+       question = re.sub(r"#\w+", "", question).strip()
+       options = [re.sub(r"#\w+", "", opt).strip() for opt in options]
+
        text = (
            question + "\n\n"
            + "\n".join([chr(65 + i) + ") " + opt for i, opt in enumerate(options)])
        )
+       text = clean_forwarded_text(text)
+       logger.info("Cleaned poll text: " + text[:300])
+
        await update.message.reply_text("💬 Forwarded poll detected! Processing...")
        questions = await rephrase_forwarded_mcq(text)
+
+       # --- FIX: retry once if first attempt returns nothing ---
        if not questions:
-           await update.message.reply_text("❌ Could not process poll.")
+           logger.info("Poll rephrase failed, retrying once...")
+           await asyncio.sleep(1)
+           questions = await rephrase_forwarded_mcq(text)
+
+       if not questions:
+           await update.message.reply_text(
+               "❌ Could not process poll.\n\n"
+               "The AI failed to return valid MCQ data. Try /postnow for a fresh question instead."
+           )
            return
        for q in questions:
            await send_single_for_approval(context.bot, q, "Forwarded Poll")
@@ -683,16 +579,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
    else:
        await update.message.reply_text("💬 Forwarded MCQ text detected! Processing...")
 
+       # --- FIX: Clean spoiler tags and emojis before sending to Groq ---
        cleaned = clean_forwarded_text(text)
        logger.info("Cleaned MCQ text: " + cleaned[:300])
 
        questions = await rephrase_forwarded_mcq(cleaned)
        if not questions:
-           raw_debug = await debug_rephrase_raw(cleaned)
+           logger.info("MCQ rephrase failed, retrying once...")
+           await asyncio.sleep(1)
+           questions = await rephrase_forwarded_mcq(cleaned)
+       if not questions:
            await update.message.reply_text(
                "❌ Could not process MCQ.\n\n"
-               "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer.\n\n"
-               "🔍 Groq raw output:\n" + raw_debug[:800]
+               "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer."
            )
            return
        for q in questions:
@@ -728,6 +627,48 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
        logger.error("PDF error: " + str(e))
        await update.message.reply_text("❌ PDF processing failed.")
 
+async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if update.effective_user.id != ADMIN_ID:
+       return
+   try:
+       await update.message.reply_text("📊 PPTX received. Extracting text...")
+       file = await update.message.document.get_file()
+       file_bytes = await file.download_as_bytearray()
+
+       prs = Presentation(io.BytesIO(bytes(file_bytes)))
+       text = ""
+       for slide in prs.slides:
+           for shape in slide.shapes:
+               if hasattr(shape, "text") and shape.text:
+                   text += shape.text + "\n"
+               if shape.has_text_frame:
+                   for para in shape.text_frame.paragraphs:
+                       for run in para.runs:
+                           if run.text:
+                               text += run.text + "\n"
+           text += "\n"
+
+       text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+       if not text.strip():
+           await update.message.reply_text("❌ Could not extract any text from this PPTX. It may contain only images.")
+           return
+
+       text = text[:4000]
+       await update.message.reply_text("⏳ Generating MCQs from PPTX...")
+       questions = await generate_questions_from_content(text, count=2)
+       if not questions:
+           questions = await generate_questions_from_content(text, count=1)
+       if not questions:
+           await update.message.reply_text("❌ Failed to generate MCQs from this PPTX content.")
+           return
+       for q in questions:
+           await send_single_for_approval(context.bot, q, "PPTX Upload")
+           await asyncio.sleep(1)
+   except Exception as e:
+       logger.error("PPTX error: " + str(e))
+       await update.message.reply_text("❌ PPTX processing failed: " + str(e))
+
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
@@ -740,11 +681,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
        else:
            return
        file_bytes = bytes(await file.download_as_bytearray())
-       questions = await analyze_image(file_bytes, bot=context.bot)
+       questions = await analyze_image(file_bytes)
        if not questions:
-           await update.message.reply_text(
-               "❌ All models failed. Check the ⚠️ error messages above for details."
-           )
+           await update.message.reply_text("❌ Could not generate MCQs from image.")
            return
        await update.message.reply_text("⏳ Sending for approval...")
        for q in questions:
@@ -752,7 +691,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("Image error: " + str(e))
-       await update.message.reply_text("❌ Image processing failed: " + str(e)[:200])
+       await update.message.reply_text("❌ Image processing failed.")
 
 async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
@@ -775,7 +714,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
        "📝 Forwarded MCQ text\n"
        "📊 Forwarded MCQ poll\n"
        "📄 PDF\n"
-       "🖼 Image (auto-fallback across multiple free vision models)\n"
+       "📊 PPTX (PowerPoint slides)\n"
+       "🖼 Image\n"
        "🔗 Article URL\n"
        "🎥 YouTube URL\n\n"
        "Auto: 2 Harrison MCQs every 15 min\n"
@@ -815,6 +755,7 @@ def main():
    app.add_handler(CommandHandler("testgroup", test_group))
    app.add_handler(CallbackQueryHandler(handle_callback))
    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
+   app.add_handler(MessageHandler(filters.Document.FileExtension("pptx"), handle_pptx))
    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
    app.add_handler(MessageHandler(filters.POLL, handle_forwarded_poll))
    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

@@ -1,6 +1,7 @@
 python-telegram-bot[job-queue]
 groq
 PyPDF2
+python-pptx
 httpx
 beautifulsoup4
 youtube-transcript-api

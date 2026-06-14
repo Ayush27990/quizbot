@@ -666,16 +666,18 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
        file_bytes = await file.download_as_bytearray()
        pdf_reader = PyPDF2.PdfReader(io.BytesIO(bytes(file_bytes)))
        text = ""
-       for page in pdf_reader.pages[:10]:
+       for page in pdf_reader.pages[:15]:
            extracted = page.extract_text()
            if extracted:
                text += extracted + "\n"
        if not text.strip():
            await update.message.reply_text("❌ Could not extract text.")
            return
-       text = text[:4000]
+       text = text[:6000]
        await update.message.reply_text("⏳ Generating MCQs from PDF...")
-       questions = await generate_questions_from_content(text, count=2)
+       questions = await generate_questions_from_content(text, count=5)
+       if not questions:
+           questions = await generate_questions_from_content(text, count=2)
        if not questions:
            await update.message.reply_text("❌ Failed to generate MCQs.")
            return
@@ -772,11 +774,11 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await update.message.reply_text("❌ Could not extract any text from this PPTX. It may contain only images.")
            return
 
-       text = text[:4000]
+       text = text[:6000]
        await update.message.reply_text("⏳ No ready-made MCQs detected — generating new MCQs from slide content...")
-       questions = await generate_questions_from_content(text, count=2)
+       questions = await generate_questions_from_content(text, count=5)
        if not questions:
-           questions = await generate_questions_from_content(text, count=1)
+           questions = await generate_questions_from_content(text, count=2)
        if not questions:
            await update.message.reply_text("❌ Failed to generate MCQs from this PPTX content.")
            return

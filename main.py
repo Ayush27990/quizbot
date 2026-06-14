@@ -358,7 +358,7 @@ async def analyze_image(image_bytes):
                    "X-Title": "QuizMasterBot"
                },
                json={
-                   "model": "qwen/qwen2.5-vl-72b-instruct",
+                   "model": "google/gemini-2.5-flash:free",
                    "max_tokens": 1500,
                    "messages": [
                        {
@@ -394,6 +394,7 @@ async def analyze_image(image_bytes):
            )
 
            data = response.json()
+           logger.info("OpenRouter response: " + str(data)[:300])
 
            if "error" in data:
                logger.error("OpenRouter error: " + str(data["error"]))
@@ -677,7 +678,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    try:
-       await update.message.reply_text("🖼 Image received! Analyzing with Qwen2.5-VL...")
+       await update.message.reply_text("🖼 Image received! Analyzing with Gemini 2.5 Flash (free)...")
        if update.message.photo:
            file = await update.message.photo[-1].get_file()
        elif update.message.document:
@@ -718,7 +719,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
        "📝 Forwarded MCQ text\n"
        "📊 Forwarded MCQ poll\n"
        "📄 PDF\n"
-       "🖼 Image (powered by Qwen2.5-VL)\n"
+       "🖼 Image (Gemini 2.5 Flash - Free)\n"
        "🔗 Article URL\n"
        "🎥 YouTube URL\n\n"
        "Auto: 2 Harrison MCQs every 15 min\n"

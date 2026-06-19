@@ -136,6 +136,36 @@ HARRISON_TOPICS = [
    "Approach to fever of unknown origin",
 ]
 
+
+PATHOLOGY_TOPICS = [
+   "Cell injury reversible irreversible",
+   "Apoptosis pathways intrinsic extrinsic",
+   "Necrosis coagulative liquefactive caseous fat",
+   "Acute inflammation mediators",
+   "Chronic inflammation granulomatous diseases",
+   "Amyloidosis classification diagnosis",
+   "Shock pathology",
+   "Neoplasia hallmarks of cancer",
+   "Tumor suppressor genes p53 Rb",
+   "Acute promyelocytic leukemia",
+   "Acute myeloid leukemia",
+   "Acute lymphoblastic leukemia",
+   "Chronic myeloid leukemia",
+   "Hodgkin lymphoma",
+   "Non Hodgkin lymphoma",
+   "Multiple myeloma",
+   "Minimal change disease",
+   "Membranous nephropathy",
+   "Membranoproliferative glomerulonephritis",
+   "Diabetic nephropathy",
+   "Barrett esophagus",
+   "Crohn disease pathology",
+   "Ulcerative colitis pathology"
+]
+
+ALL_TOPICS = HARRISON_TOPICS + PATHOLOGY_TOPICS
+
+
 def load_pending():
    try:
        with open(PENDING_FILE, "r") as f:
@@ -169,7 +199,7 @@ def clean_forwarded_text(text):
    # Remove Telegram spoiler tags
    text = text.replace("||", "")
    # Remove common emoji that break JSON parsing
-   text = text.replace("✅", "").replace("❌", "").replace("💡", "").replace("📝", "")
+   text = text.replace("â", "").replace("â", "").replace("ð¡", "").replace("ð", "")
    text = text.replace("Answer:", "Answer:").strip()
    # Collapse multiple spaces/newlines
    text = re.sub(r"\n{3,}", "\n\n", text)
@@ -276,10 +306,10 @@ async def generate_topic():
            if len(used_topics) > 100:
                used_topics.pop(0)
            return topic
-       return random.choice(HARRISON_TOPICS)
+       return random.choice(ALL_TOPICS)
    except Exception as e:
        logger.error("Topic generation error: " + str(e))
-       return random.choice(HARRISON_TOPICS)
+       return random.choice(ALL_TOPICS)
 
 async def generate_questions_from_content(content, count=2):
    def build_prompt(c):
@@ -292,7 +322,7 @@ async def generate_questions_from_content(content, count=2):
            "- 4 options, one definitively correct\n"
            "- Detailed explanation\n"
            "- Explain why each wrong option is incorrect\n"
-           "- NEET PG / USMLE standard\n\n"
+           "- NEET PG / INICET / USMLE level\n- Include laboratory values whenever possible\n- Avoid direct recall questions\n- Focus on pathology correlations\n\n"
            "Return ONLY a raw JSON array with no markdown, no backticks, no extra commentary:\n"
            "[\n"
            "  {\n"
@@ -410,21 +440,21 @@ async def send_single_for_approval(bot, question, source, image_bytes=None):
 
        correct_option = question["options"][question["answer_index"]]
        text = (
-           "📋 MCQ FOR APPROVAL\n\n"
-           "📚 Source: " + source + "\n\n"
+           "ð MCQ FOR APPROVAL\n\n"
+           "ð Source: " + source + "\n\n"
            + question["question"] + "\n\n"
            + "\n".join(question["options"])
-           + "\n\n✅ Correct: " + correct_option
-           + "\n\n💡 Explanation:\n" + question["explanation"]
+           + "\n\nâ Correct: " + correct_option
+           + "\n\nð¡ Explanation:\n" + question["explanation"]
        )
 
        keyboard = InlineKeyboardMarkup([
            [
-               InlineKeyboardButton("✅ Approve & Post", callback_data="approve_" + qid),
-               InlineKeyboardButton("❌ Reject", callback_data="reject_" + qid)
+               InlineKeyboardButton("â Approve & Post", callback_data="approve_" + qid),
+               InlineKeyboardButton("â Reject", callback_data="reject_" + qid)
            ],
            [
-               InlineKeyboardButton("🔄 Regenerate", callback_data="regen_" + qid)
+               InlineKeyboardButton("ð Regenerate", callback_data="regen_" + qid)
            ]
        ])
 
@@ -435,7 +465,7 @@ async def send_single_for_approval(bot, question, source, image_bytes=None):
            await bot.send_photo(
                chat_id=ADMIN_ID,
                photo=io.BytesIO(image_bytes),
-               caption="🖼 Image for this MCQ"
+               caption="ð¼ Image for this MCQ"
            )
 
        await bot.send_message(
@@ -453,7 +483,7 @@ async def post_single_to_group(bot, question, image_bytes=None):
            await bot.send_photo(
                chat_id=MEDICINE_GROUP_ID,
                photo=io.BytesIO(image_bytes),
-               caption="🔍 Study this image carefully before answering!"
+               caption="ð Study this image carefully before answering!"
            )
            await asyncio.sleep(1)
 
@@ -482,7 +512,7 @@ async def post_single_to_group(bot, question, image_bytes=None):
        await asyncio.sleep(2)
 
        explanation_escaped = escape_md(question["explanation"])
-       spoiler = "💡 Explanation:\n\n||" + explanation_escaped + "||"
+       spoiler = "ð¡ Explanation:\n\n||" + explanation_escaped + "||"
        await bot.send_message(
            chat_id=MEDICINE_GROUP_ID,
            text=spoiler,
@@ -524,21 +554,21 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
            )
            pending_questions.pop(qid, None)
            save_pending(pending_questions)
-           await query.edit_message_text("✅ Posted to medicine group!")
+           await query.edit_message_text("â Posted to medicine group!")
        else:
-           await query.edit_message_text("❌ Question expired. Use /postnow to generate new ones.")
+           await query.edit_message_text("â Question expired. Use /postnow to generate new ones.")
 
    elif data.startswith("reject_"):
        qid = data.replace("reject_", "")
        pending_questions.pop(qid, None)
        save_pending(pending_questions)
-       await query.edit_message_text("❌ Rejected.")
+       await query.edit_message_text("â Rejected.")
 
    elif data.startswith("regen_"):
        qid = data.replace("regen_", "")
        pending_questions.pop(qid, None)
        save_pending(pending_questions)
-       await query.edit_message_text("🔄 Regenerating...")
+       await query.edit_message_text("ð Regenerating...")
        topic = await generate_topic()
        questions = await generate_questions_from_content(topic, count=1)
        if questions:
@@ -546,7 +576,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
        else:
            await context.bot.send_message(
                chat_id=ADMIN_ID,
-               text="❌ Failed to regenerate. Try /postnow"
+               text="â Failed to regenerate. Try /postnow"
            )
 
 async def handle_forwarded_poll(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,7 +600,7 @@ async def handle_forwarded_poll(update: Update, context: ContextTypes.DEFAULT_TY
        text = clean_forwarded_text(text)
        logger.info("Cleaned poll text: " + text[:300])
 
-       await update.message.reply_text("💬 Forwarded poll detected! Processing...")
+       await update.message.reply_text("ð¬ Forwarded poll detected! Processing...")
        questions = await rephrase_forwarded_mcq(text)
 
        # --- FIX: retry once if first attempt returns nothing ---
@@ -581,7 +611,7 @@ async def handle_forwarded_poll(update: Update, context: ContextTypes.DEFAULT_TY
 
        if not questions:
            await update.message.reply_text(
-               "❌ Could not process poll.\n\n"
+               "â Could not process poll.\n\n"
                "The AI failed to return valid MCQ data. Try /postnow for a fresh question instead."
            )
            return
@@ -590,7 +620,7 @@ async def handle_forwarded_poll(update: Update, context: ContextTypes.DEFAULT_TY
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("Forwarded poll error: " + str(e))
-       await update.message.reply_text("❌ Failed to process poll.")
+       await update.message.reply_text("â Failed to process poll.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
@@ -599,36 +629,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
    text = update.message.text.strip()
 
    if text.startswith("/debug"):
-       await update.message.reply_text("🔍 Raw text received:\n\n" + repr(text[:500]))
+       await update.message.reply_text("ð Raw text received:\n\n" + repr(text[:500]))
        return
 
    if text.startswith("http://") or text.startswith("https://"):
        youtube_id = extract_youtube_id(text)
 
        if youtube_id:
-           await update.message.reply_text("🎥 YouTube link! Fetching transcript...")
+           await update.message.reply_text("ð¥ YouTube link! Fetching transcript...")
            transcript = await get_youtube_transcript(youtube_id)
            if not transcript:
-               await update.message.reply_text("❌ No transcript. Trying page content...")
+               await update.message.reply_text("â No transcript. Trying page content...")
                transcript = await fetch_url_content(text)
            if not transcript:
-               await update.message.reply_text("❌ Could not extract content.")
+               await update.message.reply_text("â Could not extract content.")
                return
-           await update.message.reply_text("⏳ Generating MCQs from video...")
+           await update.message.reply_text("â³ Generating MCQs from video...")
            questions = await generate_questions_from_content(transcript, count=2)
            source = "YouTube: " + text[:50]
        else:
-           await update.message.reply_text("🔗 Article URL! Fetching content...")
+           await update.message.reply_text("ð Article URL! Fetching content...")
            content = await fetch_url_content(text)
            if not content:
-               await update.message.reply_text("❌ Could not fetch content.")
+               await update.message.reply_text("â Could not fetch content.")
                return
-           await update.message.reply_text("⏳ Generating MCQs from article...")
+           await update.message.reply_text("â³ Generating MCQs from article...")
            questions = await generate_questions_from_content(content, count=2)
            source = "Article: " + text[:50]
 
        if not questions:
-           await update.message.reply_text("❌ Failed to generate MCQs.")
+           await update.message.reply_text("â Failed to generate MCQs.")
            return
 
        for q in questions:
@@ -636,7 +666,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
            await asyncio.sleep(1)
 
    else:
-       await update.message.reply_text("💬 Forwarded MCQ text detected! Processing...")
+       await update.message.reply_text("ð¬ Forwarded MCQ text detected! Processing...")
 
        # --- FIX: Clean spoiler tags and emojis before sending to Groq ---
        cleaned = clean_forwarded_text(text)
@@ -649,7 +679,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
            questions = await rephrase_forwarded_mcq(cleaned)
        if not questions:
            await update.message.reply_text(
-               "❌ Could not process MCQ.\n\n"
+               "â Could not process MCQ.\n\n"
                "Tip: Make sure text has a question, 4 options (A/B/C/D), and an answer."
            )
            return
@@ -661,7 +691,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    try:
-       await update.message.reply_text("📄 PDF received. Extracting text...")
+       await update.message.reply_text("ð PDF received. Extracting text...")
        file = await update.message.document.get_file()
        file_bytes = await file.download_as_bytearray()
        pdf_reader = PyPDF2.PdfReader(io.BytesIO(bytes(file_bytes)))
@@ -671,22 +701,22 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
            if extracted:
                text += extracted + "\n"
        if not text.strip():
-           await update.message.reply_text("❌ Could not extract text.")
+           await update.message.reply_text("â Could not extract text.")
            return
        text = text[:6000]
-       await update.message.reply_text("⏳ Generating MCQs from PDF...")
+       await update.message.reply_text("â³ Generating MCQs from PDF...")
        questions = await generate_questions_from_content(text, count=5)
        if not questions:
            questions = await generate_questions_from_content(text, count=2)
        if not questions:
-           await update.message.reply_text("❌ Failed to generate MCQs.")
+           await update.message.reply_text("â Failed to generate MCQs.")
            return
        for q in questions:
            await send_single_for_approval(context.bot, q, "PDF Upload")
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("PDF error: " + str(e))
-       await update.message.reply_text("❌ PDF processing failed.")
+       await update.message.reply_text("â PDF processing failed.")
 
 def get_slide_text(slide):
    parts = []
@@ -732,7 +762,7 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    try:
-       await update.message.reply_text("📊 PPTX received. Extracting text...")
+       await update.message.reply_text("ð PPTX received. Extracting text...")
        file = await update.message.document.get_file()
        file_bytes = await file.download_as_bytearray()
 
@@ -743,7 +773,7 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
        if blocks:
            await update.message.reply_text(
-               "✅ Found " + str(len(blocks)) + " ready-made MCQ(s) in this PPTX (out of "
+               "â Found " + str(len(blocks)) + " ready-made MCQ(s) in this PPTX (out of "
                + str(total_slides) + " slides). Processing them now..."
            )
            sent_any = False
@@ -762,38 +792,38 @@ async def handle_pptx(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    logger.error("Could not process one MCQ block from PPTX")
                await asyncio.sleep(1)
            if not sent_any:
-               await update.message.reply_text("❌ Found MCQs in the PPTX but the AI failed to process any of them.")
+               await update.message.reply_text("â Found MCQs in the PPTX but the AI failed to process any of them.")
            return
 
        # --- Fallback: treat as lecture slides, generate new MCQs from content ---
        text = "\n\n".join(get_slide_text(s) for s in prs.slides)
-       text = re.sub(r"[•▪►➤●○◦]", "-", text)
+       text = re.sub(r"[â¢âªâºâ¤âââ¦]", "-", text)
        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
        if not text:
-           await update.message.reply_text("❌ Could not extract any text from this PPTX. It may contain only images.")
+           await update.message.reply_text("â Could not extract any text from this PPTX. It may contain only images.")
            return
 
        text = text[:6000]
-       await update.message.reply_text("⏳ No ready-made MCQs detected — generating new MCQs from slide content...")
+       await update.message.reply_text("â³ No ready-made MCQs detected â generating new MCQs from slide content...")
        questions = await generate_questions_from_content(text, count=5)
        if not questions:
            questions = await generate_questions_from_content(text, count=2)
        if not questions:
-           await update.message.reply_text("❌ Failed to generate MCQs from this PPTX content.")
+           await update.message.reply_text("â Failed to generate MCQs from this PPTX content.")
            return
        for q in questions:
            await send_single_for_approval(context.bot, q, "PPTX Upload")
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("PPTX error: " + str(e))
-       await update.message.reply_text("❌ PPTX processing failed: " + str(e))
+       await update.message.reply_text("â PPTX processing failed: " + str(e))
 
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    try:
-       await update.message.reply_text("🖼 Image received! Analyzing...")
+       await update.message.reply_text("ð¼ Image received! Analyzing...")
        if update.message.photo:
            file = await update.message.photo[-1].get_file()
        elif update.message.document:
@@ -803,15 +833,15 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
        file_bytes = bytes(await file.download_as_bytearray())
        questions = await analyze_image(file_bytes)
        if not questions:
-           await update.message.reply_text("❌ Could not generate MCQs from image.")
+           await update.message.reply_text("â Could not generate MCQs from image.")
            return
-       await update.message.reply_text("⏳ Sending for approval...")
+       await update.message.reply_text("â³ Sending for approval...")
        for q in questions:
            await send_single_for_approval(context.bot, q, "Image Upload", image_bytes=file_bytes)
            await asyncio.sleep(1)
    except Exception as e:
        logger.error("Image error: " + str(e))
-       await update.message.reply_text("❌ Image processing failed.")
+       await update.message.reply_text("â Image processing failed.")
 
 async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
@@ -819,25 +849,25 @@ async def test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
    try:
        await context.bot.send_message(
            chat_id=MEDICINE_GROUP_ID,
-           text="🧪 Test message from bot!"
+           text="ð§ª Test message from bot!"
        )
-       await update.message.reply_text("✅ Success! Bot can post to group.")
+       await update.message.reply_text("â Success! Bot can post to group.")
    except Exception as e:
-       await update.message.reply_text("❌ Error: " + str(e))
+       await update.message.reply_text("â Error: " + str(e))
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    await update.message.reply_text(
-       "✅ QuizMasterBot Running!\n\n"
+       "â QuizMasterBot Running!\n\n"
        "Send me:\n"
-       "📝 Forwarded MCQ text\n"
-       "📊 Forwarded MCQ poll\n"
-       "📄 PDF\n"
-       "📊 PPTX (PowerPoint slides)\n"
-       "🖼 Image\n"
-       "🔗 Article URL\n"
-       "🎥 YouTube URL\n\n"
+       "ð Forwarded MCQ text\n"
+       "ð Forwarded MCQ poll\n"
+       "ð PDF\n"
+       "ð PPTX (PowerPoint slides)\n"
+       "ð¼ Image\n"
+       "ð Article URL\n"
+       "ð¥ YouTube URL\n\n"
        "Auto: 2 Harrison MCQs every 15 min\n"
        "All go through your approval!\n\n"
        "Commands:\n"
@@ -850,17 +880,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
-   await update.message.reply_text("⏳ Generating Harrison MCQs... please wait")
+   await update.message.reply_text("â³ Generating Harrison MCQs... please wait")
    await scheduled_job(context)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
    if update.effective_user.id != ADMIN_ID:
        return
    await update.message.reply_text(
-       "✅ Bot is running\n"
-       "📊 Pending approvals: " + str(len(pending_questions)) + "\n"
-       "📚 Topics used: " + str(len(used_topics))
+       "â Bot is running\n"
+       "ð Pending approvals: " + str(len(pending_questions)) + "\n"
+       "ð Topics used: " + str(len(used_topics))
    )
+
+
+async def pathology(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if update.effective_user.id != ADMIN_ID:
+       return
+   topic = random.choice(PATHOLOGY_TOPICS)
+   await update.message.reply_text("ð§¬ Generating pathology MCQs...")
+   questions = await generate_questions_from_content(topic, count=5)
+   for q in questions:
+       await send_single_for_approval(context.bot, q, "Pathology: " + topic)
+
+async def hardmcq(update: Update, context: ContextTypes.DEFAULT_TYPE):
+   if update.effective_user.id != ADMIN_ID:
+       return
+   topic = await generate_topic()
+   await update.message.reply_text("ð¥ Generating hard INICET MCQs...")
+   prompt = "Generate difficult INICET/USMLE style MCQs with labs and clinical reasoning. Topic: " + topic
+   questions = await generate_questions_from_content(prompt, count=5)
+   for q in questions:
+       await send_single_for_approval(context.bot, q, "Hard MCQ: " + topic)
+
 
 async def error_handler(update, context):
    logger.error("Update error: " + str(context.error))
@@ -872,6 +923,8 @@ def main():
    app.add_handler(CommandHandler("start", start))
    app.add_handler(CommandHandler("postnow", post_now))
    app.add_handler(CommandHandler("status", status))
+   app.add_handler(CommandHandler("pathology", pathology))
+   app.add_handler(CommandHandler("hardmcq", hardmcq))
    app.add_handler(CommandHandler("testgroup", test_group))
    app.add_handler(CallbackQueryHandler(handle_callback))
    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
